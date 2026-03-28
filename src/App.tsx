@@ -5,10 +5,10 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Rocket, Star, Orbit, ChevronRight, RotateCcw, Lightbulb, CheckCircle2, XCircle, Trophy, BookOpen, Search, ArrowLeft } from 'lucide-react';
+import { Rocket, Star, Orbit, ChevronRight, RotateCcw, Lightbulb, CheckCircle2, XCircle, Trophy, BookOpen, Search, ArrowLeft, Volume2, Sparkles } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { WORDS_100, WORD_BANK_1 } from './constants';
-import { Word, GameState, Stats, WordStatus, UserProgress } from './types';
+import { ALL_WORD_BANKS, WORD_BANK_2 } from './constants';
+import { Word, GameState, Stats, WordStatus, UserProgress, WordBank } from './types';
 
 const WORDS_PER_ROUND = 10;
 
@@ -30,40 +30,58 @@ export default function App() {
   const [wordStatus, setWordStatus] = useState<Record<string, WordStatus>>({});
   const [missionsFinished, setMissionsFinished] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedBankId, setSelectedBankId] = useState<string>(WORD_BANK_2.id);
 
-  // Derive totalStats from wordStatus
+  const currentBank = useMemo(() => 
+    ALL_WORD_BANKS.find(b => b.id === selectedBankId) || WORD_BANK_2
+  , [selectedBankId]);
+
+  // Derive totalStats from wordStatus for the current bank
   const totalStats = useMemo(() => {
     const stats: Stats = { mastered: 0, familiar: 0, unfamiliar: 0 };
-    Object.values(wordStatus).forEach(status => {
+    currentBank.words.forEach(word => {
+      const status = wordStatus[word.id];
       if (status === 'mastered') stats.mastered++;
       if (status === 'familiar') stats.familiar++;
       if (status === 'unfamiliar') stats.unfamiliar++;
     });
     return stats;
-  }, [wordStatus]);
+  }, [wordStatus, currentBank]);
 
   // Load progress from localStorage
   useEffect(() => {
     const savedProgress = localStorage.getItem('wordquest_progress');
     if (savedProgress) {
-      const progress: UserProgress = JSON.parse(savedProgress);
-      setWordStatus(progress.wordStatus || {});
-      setMissionsFinished(progress.missionsFinished || 0);
+      try {
+        const progress: UserProgress = JSON.parse(savedProgress);
+        setWordStatus(progress.wordStatus || {});
+        setMissionsFinished(progress.missionsFinished || 0);
+        if (progress.selectedBankId) {
+          setSelectedBankId(progress.selectedBankId);
+        }
+      } catch (e) {
+        console.error('Failed to parse progress', e);
+      }
     }
   }, []);
 
   // Save progress to localStorage
   useEffect(() => {
-    const progress: UserProgress = { wordStatus, missionsFinished };
+    const progress: UserProgress = { 
+      wordStatus, 
+      missionsFinished,
+      selectedBankId 
+    };
     localStorage.setItem('wordquest_progress', JSON.stringify(progress));
-  }, [wordStatus, missionsFinished]);
+  }, [wordStatus, missionsFinished, selectedBankId]);
 
   // Initialize a round
   const startNewRound = () => {
-    const masteredWords = WORDS_100.filter(w => wordStatus[w.id] === 'mastered');
-    const familiarWords = WORDS_100.filter(w => wordStatus[w.id] === 'familiar');
-    const unfamiliarWords = WORDS_100.filter(w => wordStatus[w.id] === 'unfamiliar');
-    const newWords = WORDS_100.filter(w => !wordStatus[w.id] || wordStatus[w.id] === 'new');
+    const bankWords = currentBank.words;
+    const masteredWords = bankWords.filter(w => wordStatus[w.id] === 'mastered');
+    const familiarWords = bankWords.filter(w => wordStatus[w.id] === 'familiar');
+    const unfamiliarWords = bankWords.filter(w => wordStatus[w.id] === 'unfamiliar');
+    const newWords = bankWords.filter(w => !wordStatus[w.id] || wordStatus[w.id] === 'new');
 
     const roundWords: Word[] = [];
 
@@ -85,7 +103,7 @@ export default function App() {
 
     // 4. Fallback: if still not enough, fill with anything else remaining
     if (roundWords.length < WORDS_PER_ROUND) {
-      const remainingWords = WORDS_100.filter(w => !roundWords.find(rw => rw.id === w.id));
+      const remainingWords = bankWords.filter(w => !roundWords.find(rw => rw.id === w.id));
       const shuffledRemaining = [...remainingWords].sort(() => 0.5 - Math.random());
       const neededRemaining = Math.min(WORDS_PER_ROUND - roundWords.length, shuffledRemaining.length);
       roundWords.push(...shuffledRemaining.slice(0, neededRemaining));
@@ -116,25 +134,28 @@ export default function App() {
   };
 
   const filteredWords = useMemo(() => {
-    return WORDS_100.filter(w => 
+    return currentBank.words.filter(w => 
       w.word.toLowerCase().includes(searchQuery.toLowerCase()) || 
       w.definition.toLowerCase().includes(searchQuery.toLowerCase())
     );
-  }, [searchQuery]);
+  }, [searchQuery, currentBank]);
 
   const getRank = () => {
     const total = totalStats.mastered;
-    if (total >= 100) return { name: 'Galactic Master', icon: '🌌', color: 'text-yellow-400' };
-    if (total >= 75) return { name: 'Star Commander', icon: '⭐', color: 'text-blue-400' };
-    if (total >= 50) return { name: 'Planet Explorer', icon: '🪐', color: 'text-purple-400' };
-    if (total >= 25) return { name: 'Space Pilot', icon: '🚀', color: 'text-green-400' };
+    const bankSize = currentBank.words.length;
+    const percent = bankSize > 0 ? (total / bankSize) * 100 : 0;
+
+    if (percent >= 100) return { name: 'Galactic Master', icon: '🌌', color: 'text-yellow-400' };
+    if (percent >= 75) return { name: 'Star Commander', icon: '⭐', color: 'text-blue-400' };
+    if (percent >= 50) return { name: 'Planet Explorer', icon: '🪐', color: 'text-purple-400' };
+    if (percent >= 25) return { name: 'Space Pilot', icon: '🚀', color: 'text-green-400' };
     return { name: 'Space Cadet', icon: '👨‍🚀', color: 'text-gray-400' };
   };
 
   const currentWord = gameState.currentRoundWords[gameState.currentIndex];
 
   const handleCheck = () => {
-    if (!currentWord || gameState.feedback) return;
+    if (!currentWord || gameState.feedback || !gameState.userInput.trim()) return;
 
     const isCorrect = gameState.userInput.trim().toLowerCase() === currentWord.word.toLowerCase();
     
@@ -167,7 +188,7 @@ export default function App() {
         
         setTimeout(() => {
           moveToNext(false);
-        }, 1500);
+        }, 3000);
         return;
       }
 
@@ -191,7 +212,7 @@ export default function App() {
 
       setTimeout(() => {
         moveToNext(true);
-      }, 1500);
+      }, 3000);
     } else {
       setGameState(prev => ({
         ...prev,
@@ -265,6 +286,15 @@ export default function App() {
     });
   };
 
+  const speakWord = (word: string) => {
+    if ('speechSynthesis' in window) {
+      const utterance = new SpeechSynthesisUtterance(word);
+      utterance.rate = 0.9;
+      utterance.pitch = 1;
+      window.speechSynthesis.speak(utterance);
+    }
+  };
+
   const handleHint = () => {
     setGameState(prev => {
       const nextLevel = Math.min(prev.hintLevel + 1, 3);
@@ -272,9 +302,6 @@ export default function App() {
         ...prev, 
         showHint: true,
         hintLevel: nextLevel,
-        // If wrong and user clicks tip, we might want to clear feedback to let them try again?
-        // But the user said "if click check and the input is wrong, it will also show more tips as users click tip"
-        // Let's just increment hintLevel.
       };
     });
   };
@@ -290,25 +317,60 @@ export default function App() {
 
   if (view === 'home') {
     return (
-      <div className="space-bg flex flex-col items-center justify-center p-6 text-center">
+      <div className="space-bg flex flex-col items-center justify-center p-6 text-center relative overflow-hidden">
         <div className="stars" />
+        
+        {/* Persistent App Icon */}
+        <div className="absolute top-6 left-6 z-50 flex items-center gap-2 opacity-80 hover:opacity-100 transition-opacity cursor-default">
+          <div className="bg-blue-500/20 p-2 rounded-lg backdrop-blur-sm border border-white/10">
+            <Rocket size={20} className="text-blue-400" />
+          </div>
+          <span className="text-xs font-black tracking-tighter text-white uppercase font-display hidden sm:block">WordQuest</span>
+        </div>
+
         <motion.div 
           initial={{ y: 20, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
           className="z-10 w-full max-w-lg"
         >
-          <div className="mb-8 flex justify-center">
+          <div className="mb-8 flex justify-center relative">
             <motion.div
-              animate={{ y: [0, -10, 0] }}
-              transition={{ repeat: Infinity, duration: 3, ease: "easeInOut" }}
+              animate={{ y: [0, -10, 0], rotate: [0, 5, -5, 0] }}
+              transition={{ repeat: Infinity, duration: 4, ease: "easeInOut" }}
+              className="relative"
             >
-              <Rocket size={80} className="text-blue-400" />
+              <div className="absolute inset-0 bg-blue-500/20 blur-3xl rounded-full" />
+              <Rocket size={80} className="text-blue-400 relative z-10 drop-shadow-[0_0_15px_rgba(96,165,250,0.5)]" />
+              <motion.div
+                animate={{ scale: [1, 1.2, 1], opacity: [0.5, 1, 0.5] }}
+                transition={{ repeat: Infinity, duration: 2 }}
+                className="absolute -top-4 -right-4"
+              >
+                <Sparkles size={32} className="text-yellow-400" />
+              </motion.div>
             </motion.div>
           </div>
-          <h1 className="text-5xl font-bold mb-2 tracking-tight font-display">WordQuest</h1>
-          <p className="text-blue-400 text-sm font-bold uppercase tracking-widest mb-4">
-            {WORD_BANK_1.name}
-          </p>
+          <h1 className="text-5xl font-bold mb-2 tracking-tight font-display bg-gradient-to-b from-white to-blue-300 bg-clip-text text-transparent">
+            WordQuest
+            <span className="block text-xl mt-1 text-blue-400/80 tracking-[0.2em] uppercase font-sans font-black">Galactic Vocabulary</span>
+          </h1>
+          
+          <div className="grid grid-cols-3 sm:grid-cols-5 gap-2 mb-6 max-w-md mx-auto">
+            {ALL_WORD_BANKS.map(bank => (
+              <button
+                key={bank.id}
+                onClick={() => setSelectedBankId(bank.id)}
+                className={`px-2 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all ${
+                  selectedBankId === bank.id 
+                    ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/20' 
+                    : 'bg-white/5 text-blue-300 hover:bg-white/10'
+                }`}
+              >
+                {bank.name}
+              </button>
+            ))}
+          </div>
+
           <p className="text-blue-200 text-lg mb-8 max-w-md mx-auto">
             Explore the Word Planets! Master your vocabulary through galactic missions.
           </p>
@@ -353,7 +415,7 @@ export default function App() {
               <div className="text-center">
                 <p className="text-[9px] uppercase tracking-widest text-orange-300 font-bold">Left</p>
                 <p className="text-xl font-mono font-bold text-white">
-                  {Math.max(0, WORDS_100.length - totalStats.mastered)}
+                  {Math.max(0, currentBank.words.length - totalStats.mastered)}
                 </p>
               </div>
             </div>
@@ -408,21 +470,48 @@ export default function App() {
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck="false"
+            inputMode="text"
           />
         </div>
 
-        <div className="z-10 flex-1 overflow-y-auto pr-2 space-y-4 custom-scrollbar">
-          {filteredWords.map((word) => (
-            <motion.div 
-              key={word.id}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="glass-card p-6 border-l-4 border-l-blue-500"
-            >
-              <h3 className="text-2xl font-bold text-white mb-2">{word.word}</h3>
-              <p className="text-blue-200 leading-relaxed">{word.definition}</p>
-            </motion.div>
-          ))}
+        <div className="z-10 flex-1 overflow-y-auto pr-2 custom-scrollbar">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filteredWords.map((word) => {
+              const status = wordStatus[word.id] || 'new';
+              const statusColors = {
+                mastered: 'border-l-green-500 text-green-400 bg-green-500/5',
+                familiar: 'border-l-blue-500 text-blue-400 bg-blue-500/5',
+                unfamiliar: 'border-l-purple-500 text-purple-400 bg-purple-500/5',
+                new: 'border-l-gray-500 text-gray-400 bg-gray-500/5'
+              };
+
+              return (
+                <motion.div 
+                  key={word.id}
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className={`glass-card p-4 border-l-4 ${statusColors[status]} flex flex-col h-full`}
+                >
+                  <div className="flex justify-between items-start mb-2">
+                    <h3 className="text-xl font-bold text-white leading-tight">{word.word}</h3>
+                    <span className="text-[8px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded bg-white/10">
+                      {status}
+                    </span>
+                  </div>
+                  <p className="text-blue-200 text-sm leading-relaxed mb-3 flex-grow">
+                    {word.definition}
+                  </p>
+                  {word.example && (
+                    <div className="mt-auto pt-3 border-t border-white/5">
+                      <p className="text-xs italic text-blue-300/70 line-clamp-2">
+                        "{word.example}"
+                      </p>
+                    </div>
+                  )}
+                </motion.div>
+              );
+            })}
+          </div>
           {filteredWords.length === 0 && (
             <div className="text-center py-20 text-white/40">
               <p className="text-xl">No words found in this sector...</p>
@@ -506,7 +595,7 @@ export default function App() {
                     <span className="text-sm text-white">Words Left</span>
                   </div>
                   <span className="font-mono font-bold text-white">
-                    {Math.max(0, WORDS_100.length - totalStats.mastered)}
+                    {Math.max(0, currentBank.words.length - totalStats.mastered)}
                   </span>
                 </div>
               </div>
@@ -576,22 +665,40 @@ export default function App() {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   className={`absolute inset-0 z-20 flex items-center justify-center backdrop-blur-sm ${
-                    gameState.feedback === 'correct' ? 'bg-green-500/20' : 'bg-red-500/20'
+                    gameState.feedback === 'correct' ? 'bg-green-500/40' : 'bg-red-500/20'
                   }`}
                 >
                   {gameState.feedback === 'correct' ? (
-                    <div className="text-center">
+                    <div className="text-center px-6">
                       <CheckCircle2 size={64} className="text-green-400 mx-auto mb-2" />
-                      <p className="text-green-400 font-bold text-xl uppercase tracking-widest">Correct!</p>
+                      <p className="text-green-400 font-bold text-xl uppercase tracking-widest mb-4">Correct!</p>
+                      {currentWord.example && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="bg-black/20 p-4 rounded-xl border border-white/10 italic text-white text-lg max-w-md"
+                        >
+                          "{currentWord.example}"
+                        </motion.div>
+                      )}
                     </div>
                   ) : (
                     <div className="text-center">
                       {gameState.hintLevel === 3 ? (
-                        <>
+                        <div className="text-center px-6">
                           <Lightbulb size={64} className="text-purple-400 mx-auto mb-2" />
-                          <p className="text-purple-400 font-bold text-xl uppercase tracking-widest">Memorize It</p>
-                          <p className="text-white/80 mt-2">The word was: <span className="font-bold text-white underline">{currentWord.word}</span></p>
-                        </>
+                          <p className="text-purple-400 font-bold text-xl uppercase tracking-widest mb-2">Memorize It</p>
+                          <p className="text-white/80 mb-4">The word was: <span className="font-bold text-white underline">{currentWord.word}</span></p>
+                          {currentWord.example && (
+                            <motion.div 
+                              initial={{ opacity: 0, y: 10 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="bg-black/20 p-4 rounded-xl border border-white/10 italic text-white text-lg max-w-md mx-auto"
+                            >
+                              "{currentWord.example}"
+                            </motion.div>
+                          )}
+                        </div>
                       ) : (
                         <>
                           <XCircle size={64} className="text-red-400 mx-auto mb-2" />
@@ -621,8 +728,19 @@ export default function App() {
                     exit={{ opacity: 0, height: 0 }}
                     className="space-y-4 overflow-hidden"
                   >
-                    <div className="text-blue-400 font-mono font-bold text-xl tracking-[0.3em] bg-blue-500/10 py-3 px-4 rounded-xl border border-blue-500/20 text-center">
-                      {getHintText()}
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 text-blue-400 font-mono font-bold text-xl tracking-[0.3em] bg-blue-500/10 py-3 px-4 rounded-xl border border-blue-500/20 text-center">
+                        {getHintText()}
+                      </div>
+                      {gameState.hintLevel === 3 && (
+                        <button
+                          onClick={() => speakWord(currentWord.word)}
+                          className="bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 p-3 rounded-xl border border-blue-500/30 transition-all"
+                          title="Listen to pronunciation"
+                        >
+                          <Volume2 size={24} />
+                        </button>
+                      )}
                     </div>
                     {gameState.hintLevel === 3 && currentWord.example && (
                       <motion.div 
@@ -652,6 +770,8 @@ export default function App() {
                   autoCapitalize="off"
                   spellCheck="false"
                   onPaste={(e) => e.preventDefault()}
+                  // Disable native voice input/dictation where possible
+                  inputMode="text"
                 />
               </div>
 
