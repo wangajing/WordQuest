@@ -20,9 +20,11 @@ export interface Stats {
 }
 
 export interface UserProgress {
+  uid?: string;
   wordStatus: Record<string, WordStatus>;
   missionsFinished: number;
   selectedBankId?: string;
+  lastUpdated?: string;
 }
 
 export interface GameState {

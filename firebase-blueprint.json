@@ -1,0 +1,39 @@
+{
+  "entities": {
+    "UserProgress": {
+      "title": "User Progress",
+      "description": "Stores the vocabulary progress and stats for a user.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "The unique identifier for the user."
+        },
+        "wordStatus": {
+          "type": "object",
+          "description": "A map of word IDs to their mastery status (mastered, familiar, unfamiliar)."
+        },
+        "missionsFinished": {
+          "type": "integer",
+          "description": "The total number of missions completed by the user."
+        },
+        "selectedBankId": {
+          "type": "string",
+          "description": "The ID of the last selected word bank."
+        },
+        "lastUpdated": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp of the last progress update."
+        }
+      },
+      "required": ["uid", "wordStatus"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "UserProgress",
+      "description": "The progress data for a specific user."
+    }
+  }
+}

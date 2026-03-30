@@ -3,16 +3,77 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import * as React from 'react';
+import { useState, useEffect, useMemo, Component } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Rocket, Star, Orbit, ChevronRight, RotateCcw, Lightbulb, CheckCircle2, XCircle, Trophy, BookOpen, Search, ArrowLeft, Volume2, Sparkles } from 'lucide-react';
+import { Rocket, Star, Orbit, ChevronRight, ChevronDown, RotateCcw, Lightbulb, CheckCircle2, XCircle, Trophy, BookOpen, Search, ArrowLeft, Volume2, Sparkles, LogIn, LogOut, Cloud, CloudOff } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { ALL_WORD_BANKS, WORD_BANK_2 } from './constants';
 import { Word, GameState, Stats, WordStatus, UserProgress, WordBank } from './types';
+import { auth, db, loginWithGoogle, logout, handleFirestoreError, OperationType } from './firebase';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { doc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore';
 
 const WORDS_PER_ROUND = 10;
 
-export default function App() {
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: any;
+}
+
+class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    // @ts-ignore
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  render() {
+    // @ts-ignore
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-slate-900 flex items-center justify-center p-6 text-center">
+          <div className="glass-card p-8 max-w-md w-full border-red-500/20">
+            <XCircle size={64} className="text-red-500 mx-auto mb-4" />
+            <h1 className="text-2xl font-bold text-white mb-4 font-display">System Malfunction</h1>
+            <p className="text-blue-200 mb-6">
+              {/* @ts-ignore */}
+              {this.state.error?.message?.includes('authInfo') 
+                ? "A communication error occurred with the galactic database. Please check your connection." 
+                : "An unexpected error occurred in the navigation system."}
+            </p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-6 rounded-xl transition-all shadow-lg shadow-blue-500/20"
+            >
+              Reboot System
+            </button>
+          </div>
+        </div>
+      );
+    }
+    // @ts-ignore
+    return this.props.children;
+  }
+}
+
+export default function AppWrapper() {
+  return (
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+  );
+}
+
+function App() {
   const [gameState, setGameState] = useState<GameState>({
     currentRoundWords: [],
     currentIndex: 0,
@@ -31,6 +92,11 @@ export default function App() {
   const [missionsFinished, setMissionsFinished] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedBankId, setSelectedBankId] = useState<string>(WORD_BANK_2.id);
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isBankMenuOpen, setIsBankMenuOpen] = useState(false);
+  const [lastSyncedData, setLastSyncedData] = useState<string>('');
 
   const currentBank = useMemo(() => 
     ALL_WORD_BANKS.find(b => b.id === selectedBankId) || WORD_BANK_2
@@ -48,32 +114,105 @@ export default function App() {
     return stats;
   }, [wordStatus, currentBank]);
 
-  // Load progress from localStorage
+  // Auth listener
   useEffect(() => {
-    const savedProgress = localStorage.getItem('wordquest_progress');
-    if (savedProgress) {
-      try {
-        const progress: UserProgress = JSON.parse(savedProgress);
-        setWordStatus(progress.wordStatus || {});
-        setMissionsFinished(progress.missionsFinished || 0);
-        if (progress.selectedBankId) {
-          setSelectedBankId(progress.selectedBankId);
-        }
-      } catch (e) {
-        console.error('Failed to parse progress', e);
-      }
-    }
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
   }, []);
 
-  // Save progress to localStorage
+  // Firestore sync
+  useEffect(() => {
+    if (!user) return;
+
+    const userDocRef = doc(db, 'users', user.uid);
+    const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
+      // Avoid overwriting local state if we have pending writes
+      if (docSnap.metadata.hasPendingWrites) return;
+
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        
+        // Update local state only if it differs from server to prevent loops
+        const serverDataStr = JSON.stringify({
+          wordStatus: data.wordStatus,
+          missionsFinished: data.missionsFinished,
+          selectedBankId: data.selectedBankId
+        });
+
+        if (serverDataStr !== lastSyncedData) {
+          setWordStatus(data.wordStatus || {});
+          setMissionsFinished(data.missionsFinished || 0);
+          if (data.selectedBankId) setSelectedBankId(data.selectedBankId);
+          setLastSyncedData(serverDataStr);
+        }
+      } else {
+        // First time user, upload local progress
+        const localProgress = localStorage.getItem('wordquest_progress');
+        if (localProgress) {
+          try {
+            const progress = JSON.parse(localProgress);
+            setDoc(userDocRef, {
+              uid: user.uid,
+              wordStatus: progress.wordStatus || {},
+              missionsFinished: progress.missionsFinished || 0,
+              selectedBankId: progress.selectedBankId || selectedBankId,
+              lastUpdated: serverTimestamp()
+            }).catch(err => handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`));
+          } catch (e) {}
+        }
+      }
+    }, (err) => handleFirestoreError(err, OperationType.GET, `users/${user.uid}`));
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Save progress to localStorage (frequent)
   useEffect(() => {
     const progress: UserProgress = { 
       wordStatus, 
       missionsFinished,
-      selectedBankId 
+      selectedBankId,
+      lastUpdated: new Date().toISOString()
     };
     localStorage.setItem('wordquest_progress', JSON.stringify(progress));
   }, [wordStatus, missionsFinished, selectedBankId]);
+
+  // Sync to Firestore (Debounced to prevent traffic storms)
+  useEffect(() => {
+    if (!user || !isAuthReady) return;
+
+    const currentData = {
+      wordStatus,
+      missionsFinished,
+      selectedBankId
+    };
+    const currentDataStr = JSON.stringify(currentData);
+
+    // Only sync if data has actually changed from the last known server state
+    if (currentDataStr === lastSyncedData) return;
+
+    const timeoutId = setTimeout(() => {
+      setIsSyncing(true);
+      setDoc(doc(db, 'users', user.uid), {
+        uid: user.uid,
+        ...currentData,
+        lastUpdated: serverTimestamp()
+      }, { merge: true })
+      .then(() => {
+        setIsSyncing(false);
+        setLastSyncedData(currentDataStr);
+      })
+      .catch(err => {
+        setIsSyncing(false);
+        handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+      });
+    }, 2000); // 2 second debounce
+
+    return () => clearTimeout(timeoutId);
+  }, [missionsFinished, user, wordStatus, selectedBankId, isAuthReady, lastSyncedData]);
 
   // Initialize a round
   const startNewRound = () => {
@@ -85,28 +224,34 @@ export default function App() {
 
     const roundWords: Word[] = [];
 
-    // 1. Pick exactly one mastered word (for confidence)
-    if (masteredWords.length > 0) {
-      const randomMastered = masteredWords[Math.floor(Math.random() * masteredWords.length)];
-      roundWords.push(randomMastered);
-    }
-
-    // 2. Pick exactly two new words (for new stuff)
+    // 1. Pick exactly two new words (for new stuff)
     const shuffledNew = [...newWords].sort(() => 0.5 - Math.random());
     const neededNew = Math.min(2, shuffledNew.length);
     roundWords.push(...shuffledNew.slice(0, neededNew));
 
-    // 3. Pick the rest from learning (unfamiliar) and familiar words
+    // 2. Pick the rest from learning (unfamiliar) and familiar words
     const priorityPool = [...unfamiliarWords, ...familiarWords].sort(() => 0.5 - Math.random());
     const neededPriority = Math.min(WORDS_PER_ROUND - roundWords.length, priorityPool.length);
     roundWords.push(...priorityPool.slice(0, neededPriority));
 
-    // 4. Fallback: if still not enough, fill with anything else remaining
+    // 3. Fallback: if still not enough, fill with anything else remaining (excluding mastered)
     if (roundWords.length < WORDS_PER_ROUND) {
-      const remainingWords = bankWords.filter(w => !roundWords.find(rw => rw.id === w.id));
+      const remainingWords = bankWords.filter(w => 
+        !roundWords.find(rw => rw.id === w.id) && 
+        wordStatus[w.id] !== 'mastered'
+      );
       const shuffledRemaining = [...remainingWords].sort(() => 0.5 - Math.random());
       const neededRemaining = Math.min(WORDS_PER_ROUND - roundWords.length, shuffledRemaining.length);
       roundWords.push(...shuffledRemaining.slice(0, neededRemaining));
+    }
+
+    // 4. Ultimate Fallback: If we still don't have enough (e.g. almost everything is mastered), 
+    // then and only then allow mastered words to fill the gap
+    if (roundWords.length < WORDS_PER_ROUND) {
+      const masteredFallback = bankWords.filter(w => !roundWords.find(rw => rw.id === w.id));
+      const shuffledMastered = [...masteredFallback].sort(() => 0.5 - Math.random());
+      const neededMastered = Math.min(WORDS_PER_ROUND - roundWords.length, shuffledMastered.length);
+      roundWords.push(...shuffledMastered.slice(0, neededMastered));
     }
 
     // Final shuffle of the round words
@@ -131,6 +276,7 @@ export default function App() {
   const exitToHome = () => {
     setView('home');
     setGameState(prev => ({ ...prev, isFinished: false }));
+    setIsBankMenuOpen(false);
   };
 
   const filteredWords = useMemo(() => {
@@ -187,7 +333,7 @@ export default function App() {
         }));
         
         setTimeout(() => {
-          moveToNext(false);
+          moveToNext(true); // shouldRepeat = true
         }, 3000);
         return;
       }
@@ -211,7 +357,7 @@ export default function App() {
       }));
 
       setTimeout(() => {
-        moveToNext(true);
+        moveToNext(false); // shouldRepeat = false
       }, 3000);
     } else {
       setGameState(prev => ({
@@ -233,10 +379,15 @@ export default function App() {
     }
   };
 
-  const moveToNext = (isCorrect: boolean) => {
+  const moveToNext = (shouldRepeat: boolean) => {
     setGameState(prev => {
       const nextIndex = prev.currentIndex + 1;
-      const newIncorrectWords = isCorrect ? prev.incorrectWords : [...prev.incorrectWords, currentWord];
+      const currentWordToProcess = prev.currentRoundWords[prev.currentIndex];
+      
+      // Accumulate incorrect words correctly using the previous state
+      const newIncorrectWords = shouldRepeat 
+        ? [...prev.incorrectWords, currentWordToProcess] 
+        : prev.incorrectWords;
       
       if (nextIndex >= prev.currentRoundWords.length) {
         if (newIncorrectWords.length > 0) {
@@ -249,6 +400,7 @@ export default function App() {
             feedback: null,
             showHint: false,
             hintLevel: 0,
+            attempts: 0,
           };
         } else {
           // Mission Finished!
@@ -282,8 +434,27 @@ export default function App() {
         showHint: false,
         hintLevel: 0,
         attempts: 0,
+        incorrectWords: newIncorrectWords, // Keep track of incorrect words for the end of the round
       };
     });
+  };
+
+  const skipWord = () => {
+    if (gameState.feedback) return;
+    
+    // When skipping, we treat it as "unfamiliar" and repeat it
+    setGameState(prev => ({
+      ...prev,
+      feedback: 'incorrect',
+      sessionStats: {
+        ...prev.sessionStats,
+        unfamiliar: prev.sessionStats.unfamiliar + 1
+      }
+    }));
+
+    setTimeout(() => {
+      moveToNext(true); // true means shouldRepeat
+    }, 1000);
   };
 
   const speakWord = (word: string) => {
@@ -320,12 +491,55 @@ export default function App() {
       <div className="space-bg flex flex-col items-center justify-center p-6 text-center relative overflow-hidden">
         <div className="stars" />
         
-        {/* Persistent App Icon */}
-        <div className="absolute top-6 left-6 z-50 flex items-center gap-2 opacity-80 hover:opacity-100 transition-opacity cursor-default">
-          <div className="bg-blue-500/20 p-2 rounded-lg backdrop-blur-sm border border-white/10">
-            <Rocket size={20} className="text-blue-400" />
+        {/* Persistent App Icon & Auth */}
+        <div className="absolute top-6 left-6 right-6 z-50 flex items-center justify-between">
+          <div className="flex items-center gap-2 opacity-80 hover:opacity-100 transition-opacity cursor-default">
+            <div className="bg-blue-500/20 p-2 rounded-lg backdrop-blur-sm border border-white/10">
+              <Rocket size={20} className="text-blue-400" />
+            </div>
+            <span className="text-xs font-black tracking-tighter text-white uppercase font-display hidden sm:block">WordQuest</span>
           </div>
-          <span className="text-xs font-black tracking-tighter text-white uppercase font-display hidden sm:block">WordQuest</span>
+
+          <div className="flex items-center gap-3">
+            {user ? (
+              <div className="flex items-center gap-3 bg-white/5 p-1 pr-3 rounded-full border border-white/10 backdrop-blur-sm">
+                <img 
+                  src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName || 'User'}`} 
+                  alt="Profile" 
+                  className="w-8 h-8 rounded-full border border-white/20"
+                  referrerPolicy="no-referrer"
+                />
+                <div className="hidden md:block text-left">
+                  <p className="text-[10px] font-bold text-white leading-none">{user.displayName}</p>
+                  <div className="flex items-center gap-1">
+                    {isSyncing ? (
+                      <span className="text-[8px] text-blue-400 animate-pulse">Syncing...</span>
+                    ) : (
+                      <>
+                        <Cloud size={8} className="text-green-400" />
+                        <span className="text-[8px] text-green-400/70">Synced</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <button 
+                  onClick={() => logout()}
+                  className="text-white/40 hover:text-red-400 transition-colors p-1"
+                  title="Sign Out"
+                >
+                  <LogOut size={16} />
+                </button>
+              </div>
+            ) : (
+              <button 
+                onClick={() => loginWithGoogle()}
+                className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white text-xs font-bold py-2 px-4 rounded-full border border-white/10 backdrop-blur-sm transition-all"
+              >
+                <LogIn size={14} />
+                Sign In
+              </button>
+            )}
+          </div>
         </div>
 
         <motion.div 
@@ -355,20 +569,61 @@ export default function App() {
             <span className="block text-xl mt-1 text-blue-400/80 tracking-[0.2em] uppercase font-sans font-black">Galactic Vocabulary</span>
           </h1>
           
-          <div className="grid grid-cols-3 sm:grid-cols-5 gap-2 mb-6 max-w-md mx-auto">
-            {ALL_WORD_BANKS.map(bank => (
-              <button
-                key={bank.id}
-                onClick={() => setSelectedBankId(bank.id)}
-                className={`px-2 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all ${
-                  selectedBankId === bank.id 
-                    ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/20' 
-                    : 'bg-white/5 text-blue-300 hover:bg-white/10'
-                }`}
-              >
-                {bank.name}
-              </button>
-            ))}
+          <div className="relative mb-8 max-w-xs mx-auto">
+            <button
+              onClick={() => setIsBankMenuOpen(!isBankMenuOpen)}
+              className="w-full flex items-center justify-between bg-white/5 hover:bg-white/10 text-blue-300 px-4 py-3 rounded-xl border border-white/10 backdrop-blur-md transition-all group"
+            >
+              <div className="flex items-center gap-3">
+                <div className="bg-blue-500/20 p-1.5 rounded-lg group-hover:bg-blue-500/30 transition-colors">
+                  <Orbit size={16} className="text-blue-400" />
+                </div>
+                <div className="text-left">
+                  <p className="text-[10px] uppercase tracking-[0.2em] font-black opacity-50 leading-none mb-1">Sector</p>
+                  <p className="text-sm font-bold text-white leading-none">{currentBank.name}</p>
+                </div>
+              </div>
+              <ChevronDown size={18} className={`transition-transform duration-300 ${isBankMenuOpen ? 'rotate-180' : ''}`} />
+            </button>
+
+            <AnimatePresence>
+              {isBankMenuOpen && (
+                <>
+                  <div 
+                    className="fixed inset-0 z-40" 
+                    onClick={() => setIsBankMenuOpen(false)} 
+                  />
+                  <motion.div
+                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                    className="absolute top-full left-0 right-0 mt-2 z-50 bg-slate-900/90 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden shadow-2xl shadow-black/50"
+                  >
+                    <div className="p-2 grid grid-cols-1 gap-1">
+                      {ALL_WORD_BANKS.map(bank => (
+                        <button
+                          key={bank.id}
+                          onClick={() => {
+                            setSelectedBankId(bank.id);
+                            setIsBankMenuOpen(false);
+                          }}
+                          className={`flex items-center justify-between px-4 py-3 rounded-xl transition-all ${
+                            selectedBankId === bank.id 
+                              ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' 
+                              : 'text-blue-200/70 hover:bg-white/5 hover:text-white'
+                          }`}
+                        >
+                          <span className="text-sm font-bold">{bank.name}</span>
+                          {selectedBankId === bank.id && (
+                            <div className="w-1.5 h-1.5 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.8)]" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </motion.div>
+                </>
+              )}
+            </AnimatePresence>
           </div>
 
           <p className="text-blue-200 text-lg mb-8 max-w-md mx-auto">
@@ -434,7 +689,7 @@ export default function App() {
               className="bg-white/5 hover:bg-white/10 text-white font-bold py-6 px-8 rounded-2xl text-xl transition-all transform hover:scale-105 border border-white/10 flex flex-col items-center gap-3"
             >
               <BookOpen size={24} className="text-purple-400" />
-              Free Browse
+              Word Library
             </button>
           </div>
         </motion.div>
@@ -446,16 +701,69 @@ export default function App() {
     return (
       <div className="space-bg flex flex-col p-6">
         <div className="stars" />
-        <div className="z-10 flex items-center justify-between mb-8">
-          <button 
-            onClick={exitToHome}
-            className="flex items-center gap-2 text-blue-300 hover:text-white transition-colors"
-          >
-            <ArrowLeft size={20} />
-            Back to Home
-          </button>
-          <h2 className="text-2xl font-bold font-display">Word Library</h2>
-          <div className="w-20" /> {/* Spacer */}
+        <div className="z-30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+          <div className="flex items-center gap-4">
+            <button 
+              onClick={exitToHome}
+              className="flex items-center gap-2 text-blue-300 hover:text-white transition-colors bg-white/5 px-4 py-2 rounded-xl border border-white/10"
+            >
+              <ArrowLeft size={20} />
+              <span className="hidden sm:inline">Back</span>
+            </button>
+            <h2 className="text-2xl font-bold font-display text-white">Library</h2>
+          </div>
+
+          <div className="relative w-full sm:w-64">
+            <button
+              onClick={() => setIsBankMenuOpen(!isBankMenuOpen)}
+              className="w-full flex items-center justify-between bg-white/5 hover:bg-white/10 text-blue-300 px-4 py-2 rounded-xl border border-white/10 backdrop-blur-md transition-all group"
+            >
+              <div className="flex items-center gap-3">
+                <Orbit size={16} className="text-blue-400" />
+                <span className="text-sm font-bold text-white truncate max-w-[120px]">{currentBank.name}</span>
+              </div>
+              <ChevronDown size={16} className={`transition-transform duration-300 ${isBankMenuOpen ? 'rotate-180' : ''}`} />
+            </button>
+
+            <AnimatePresence>
+              {isBankMenuOpen && (
+                <>
+                  <div 
+                    className="fixed inset-0 z-40" 
+                    onClick={() => setIsBankMenuOpen(false)} 
+                  />
+                  <motion.div
+                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                    className="absolute top-full left-0 right-0 mt-2 z-50 bg-slate-900/90 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden shadow-2xl shadow-black/50"
+                  >
+                    <div className="p-2 grid grid-cols-1 gap-1">
+                      {ALL_WORD_BANKS.map(bank => (
+                        <button
+                          key={bank.id}
+                          onClick={() => {
+                            setSelectedBankId(bank.id);
+                            setIsBankMenuOpen(false);
+                          }}
+                          className={`flex items-center justify-between px-4 py-2 rounded-xl transition-all ${
+                            selectedBankId === bank.id 
+                              ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' 
+                              : 'text-blue-200/70 hover:bg-white/5 hover:text-white'
+                          }`}
+                        >
+                          <span className="text-xs font-bold">{bank.name}</span>
+                          {selectedBankId === bank.id && (
+                            <div className="w-1.5 h-1.5 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.8)]" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </motion.div>
+                </>
+              )}
+            </AnimatePresence>
+          </div>
         </div>
 
         <div className="z-10 mb-8 relative">
@@ -493,10 +801,39 @@ export default function App() {
                   className={`glass-card p-4 border-l-4 ${statusColors[status]} flex flex-col h-full`}
                 >
                   <div className="flex justify-between items-start mb-2">
-                    <h3 className="text-xl font-bold text-white leading-tight">{word.word}</h3>
-                    <span className="text-[8px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded bg-white/10">
-                      {status}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-xl font-bold text-white leading-tight">{word.word}</h3>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          speakWord(word.word);
+                        }}
+                        className="text-blue-400 hover:text-blue-300 transition-colors p-1 rounded-full hover:bg-white/5"
+                        title="Listen"
+                      >
+                        <Volume2 size={16} />
+                      </button>
+                    </div>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className="text-[8px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded bg-white/10">
+                        {status}
+                      </span>
+                      <button
+                        onClick={() => {
+                          setWordStatus(prev => ({
+                            ...prev,
+                            [word.id]: status === 'mastered' ? 'new' : 'mastered'
+                          }));
+                        }}
+                        className={`text-[9px] font-bold uppercase tracking-tighter px-2 py-1 rounded-md transition-all ${
+                          status === 'mastered'
+                            ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
+                            : 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                        }`}
+                      >
+                        {status === 'mastered' ? 'Unmark Mastered' : 'Mark Mastered'}
+                      </button>
+                    </div>
                   </div>
                   <p className="text-blue-200 text-sm leading-relaxed mb-3 flex-grow">
                     {word.definition}
@@ -783,6 +1120,14 @@ export default function App() {
                 >
                   <Lightbulb size={18} />
                   {gameState.hintLevel === 0 ? 'Tip' : `Tip ${gameState.hintLevel}/3`}
+                </button>
+                <button
+                  onClick={skipWord}
+                  disabled={!!gameState.feedback}
+                  className="flex-1 bg-white/5 hover:bg-white/10 disabled:opacity-50 text-orange-300 py-3 rounded-xl flex items-center justify-center gap-2 transition-all border border-white/5"
+                >
+                  <RotateCcw size={18} />
+                  Skip
                 </button>
                 <button
                   onClick={handleCheck}

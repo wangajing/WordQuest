@@ -1,0 +1,57 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {uid}
+    // Fields:
+    //   - uid: string (required) - The unique identifier for the user.
+    //   - wordStatus: map (required) - A map of word IDs to their mastery status.
+    //   - missionsFinished: int (optional) - The total number of missions completed.
+    //   - selectedBankId: string (optional) - The ID of the last selected word bank.
+    //   - lastUpdated: timestamp (optional) - The timestamp of the last update.
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidUserProgress(data) {
+      return data.keys().hasAll(['uid', 'wordStatus']) &&
+             data.uid is string &&
+             data.uid == request.auth.uid &&
+             data.wordStatus is map &&
+             (!('missionsFinished' in data) || data.missionsFinished is int) &&
+             (!('selectedBankId' in data) || data.selectedBankId is string) &&
+             (!('lastUpdated' in data) || data.lastUpdated is timestamp);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUserProgress(request.resource.data);
+      allow update: if isOwner(userId) && isValidUserProgress(request.resource.data);
+      allow delete: if isOwner(userId);
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
